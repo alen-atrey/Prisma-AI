@@ -7,6 +7,8 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>Prisma AI</title>
+    <!-- Babel Standalone for in-browser JSX/TSX transpilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
@@ -24,6 +26,19 @@
         }
       }
     </script>
+    <!-- Mock process.env for Netlify Environment Variables -->
+    <script>
+      window.process = {
+        env: {
+          REACT_APP_WEBHOOK_URL: "",
+          REACT_APP_USERNAME: "",
+          REACT_APP_PASSWORD: ""
+        }
+      };
+    </script>
+    <!-- If you generate an env.js file during Netlify build, uncomment the line below -->
+    <!-- <script src="/env.js"></script> -->
+
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Onest:wght@300;400;500;600&display=swap');
       
@@ -83,5 +98,7 @@
 </head>
   <body class="bg-white dark:bg-[#212121] h-screen overflow-hidden transition-colors duration-200">
     <div id="root" class="h-full"></div>
+    <!-- Main Application Entry Point compiled by Babel -->
+    <script type="text/babel" data-type="module" src="./index.tsx"></script>
   </body>
 </html>

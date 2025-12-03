@@ -14,10 +14,16 @@ export const MODEL_OPTIONS: ModelOption[] = [
   { label: 'Claude Sonnet 4.5', id: '10' },
 ];
 
+// Helper to safely access process.env in browser
+const getEnv = (key: string) => {
+  // @ts-ignore
+  return (typeof window !== 'undefined' && window.process?.env?.[key]) || '';
+};
+
 export const DEFAULT_SETTINGS: Settings = {
-  webhookUrl: '',
-  username: '',
-  password: '',
+  webhookUrl: getEnv('REACT_APP_WEBHOOK_URL'),
+  username: getEnv('REACT_APP_USERNAME'),
+  password: getEnv('REACT_APP_PASSWORD'),
   firstName: '',
   telegramUsername: '',
   theme: 'light',
