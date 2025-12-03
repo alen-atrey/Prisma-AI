@@ -169,10 +169,7 @@ const App: React.FC = () => {
       }
       setSettingsLoaded(true);
 
-      // Open settings if webhook is missing
-      if (!loadedSettings.webhookUrl) {
-        setIsSettingsOpen(true);
-      }
+      // Removed auto-open settings logic here
 
       // Load Chats
       const savedChats = localStorage.getItem('prisma_chats');
