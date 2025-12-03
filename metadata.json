@@ -1,0 +1,5 @@
+{
+  "name": "Prisma AI",
+  "description": "A minimalist, Apple-inspired chat interface with configurable webhook integration and specific model selection logic.",
+  "requestFramePermissions": []
+}
