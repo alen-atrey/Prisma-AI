@@ -5,7 +5,7 @@ export const MODEL_OPTIONS: ModelOption[] = [
   { label: 'GPT-5 Nano', id: '1' },
   { label: 'GPT-5 Mini', id: '2' },
   { label: 'GPT-5.1', id: '3' },
-  { label: 'GPT-O4 mini deep research', id: '4' },
+  { label: 'GPT-5 Pro', id: '4' },
   { label: 'Gemini 2.5 Flash Lite', id: '5' },
   { label: 'Gemini 2.5 Flash', id: '6' },
   { label: 'Gemini 3 Pro Preview', id: '7' },
@@ -47,3 +47,8 @@ export const SUGGESTION_CARDS = [
     subtitle: 'простыми словами',
   },
 ];
+
+// Supabase Configuration
+export const SUPABASE_URL = "https://prismasupabase.com";
+// Using the public Anonymous Key (Safe for frontend use with RLS policies)
+export const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzY0OTc5MjAwLCJleHAiOjE5MjI3NDU2MDB9.SWVZ_tgSyeCQkmbJE12svdtEHhCJgMrrZ4c_vi9FRiY";

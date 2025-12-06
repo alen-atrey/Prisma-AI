@@ -7,8 +7,6 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>Prisma AI</title>
-    <!-- Babel Standalone for in-browser JSX/TSX transpilation -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
@@ -26,19 +24,6 @@
         }
       }
     </script>
-    <!-- Mock process.env for Netlify Environment Variables -->
-    <script>
-      window.process = {
-        env: {
-          REACT_APP_WEBHOOK_URL: "",
-          REACT_APP_USERNAME: "",
-          REACT_APP_PASSWORD: ""
-        }
-      };
-    </script>
-    <!-- If you generate an env.js file during Netlify build, uncomment the line below -->
-    <!-- <script src="/env.js"></script> -->
-
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Onest:wght@300;400;500;600&display=swap');
       
@@ -91,14 +76,14 @@
     "uuid": "https://aistudiocdn.com/uuid@^13.0.0",
     "react-markdown": "https://aistudiocdn.com/react-markdown@^10.1.0",
     "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
-    "remark-gfm": "https://aistudiocdn.com/remark-gfm@^4.0.1"
+    "remark-gfm": "https://aistudiocdn.com/remark-gfm@^4.0.1",
+    "@supabase/supabase-js": "https://aistudiocdn.com/@supabase/supabase-js@^2.86.2"
   }
 }
 </script>
 </head>
   <body class="bg-white dark:bg-[#212121] h-screen overflow-hidden transition-colors duration-200">
     <div id="root" class="h-full"></div>
-    <!-- Main Application Entry Point compiled by Babel -->
-    <script type="text/babel" data-type="module" src="./index.tsx"></script>
+    <script type="module" src="/index.tsx"></script>
   </body>
 </html>

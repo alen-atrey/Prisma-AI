@@ -13,7 +13,8 @@
     "uuid": "^13.0.0",
     "react-markdown": "^10.1.0",
     "react-dom": "^19.2.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "@supabase/supabase-js": "^2.86.2"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
