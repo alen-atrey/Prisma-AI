@@ -25,6 +25,13 @@ export interface Chat {
   title: string;
   date: Date;
   messages: Message[];
+  project_id?: string | null; // Optional link to a project
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  telegram_id?: string;
 }
 
 export interface Settings {

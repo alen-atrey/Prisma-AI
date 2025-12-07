@@ -4,7 +4,7 @@ import Sidebar from './components/Sidebar';
 import SettingsModal from './components/SettingsModal';
 import MessageBubble from './components/MessageBubble';
 import { IconPaperclip, IconSend, IconMenu, IconChevronDown, IconRobot, IconFile, IconImage, IconCamera, IconX, IconPlus, IconGlobe, IconSparkles } from './components/Icons';
-import { Chat, Message, Settings, Attachment } from './types';
+import { Chat, Message, Settings, Attachment, Project } from './types';
 import { MODEL_OPTIONS, DEFAULT_SETTINGS, SUGGESTION_CARDS, SUPABASE_URL, SUPABASE_ANON_KEY } from './constants';
 
 // --- Supabase Init ---
@@ -20,7 +20,7 @@ try {
 // Simple UUID generator fallback
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
-// Constants - Max size 10MB
+// Constants
 const MAX_FILE_SIZE = 10 * 1024 * 1024; 
 const ALLOWED_EXTENSIONS_STRING = ".pdf,.md,.txt,.rtf,.doc,.docx,.xml,.json,.csv,.xls,.xlsx,.jpg,.jpeg,.png,.webp,.bmp,.gif,.svg";
 const ALLOWED_IMAGE_EXTENSIONS = ".jpg,.jpeg,.png,.webp,.bmp,.gif,.svg";
@@ -39,6 +39,8 @@ function toBase64(str: string) {
 const App: React.FC = () => {
   // State
   const [chats, setChats] = useState<Chat[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [activeTelegramId, setActiveTelegramId] = useState<string | null>(null);
@@ -103,6 +105,7 @@ const App: React.FC = () => {
     const resolveUserAndFetch = async () => {
       if (!settings.telegramUsername || !supabase) {
         setChats([]);
+        setProjects([]);
         setActiveTelegramId(null);
         return;
       }
@@ -114,7 +117,6 @@ const App: React.FC = () => {
 
       const tryUpsert = async () => {
           try {
-            // Upsert user into public.users table using Anon Key (relies on permissive RLS)
             const { error: upsertError } = await supabase
               .from('users')
               .upsert({ telegram_id: telegramId, first_name: settings.firstName || 'User' }, { onConflict: 'telegram_id' });
@@ -129,10 +131,10 @@ const App: React.FC = () => {
                if (upsertError.code !== 'PGRST002') {
                    console.error("Supabase User Upsert Failed:", JSON.stringify(upsertError, null, 2));
                }
-               // If upsert fails (e.g. network), go offline
                setIsOfflineMode(true);
             } else {
                fetchHistory(telegramId);
+               fetchProjects(telegramId);
             }
 
           } catch (err: any) {
@@ -158,10 +160,7 @@ const App: React.FC = () => {
         .order('updated_at', { ascending: false });
 
       if (chatsError) throw chatsError;
-      if (!chatsData || chatsData.length === 0) {
-          setChats([]);
-          return;
-      }
+      if (!chatsData) return;
 
       const { data: messagesData, error: msgsError } = await supabase
         .from('messages')
@@ -175,6 +174,7 @@ const App: React.FC = () => {
         id: c.id,
         title: c.title || 'New Chat',
         date: new Date(c.created_at),
+        project_id: c.project_id || null, 
         messages: messagesData
           ?.filter((m: any) => m.chat_id === c.id)
           .map((m: any) => ({
@@ -195,23 +195,31 @@ const App: React.FC = () => {
     }
   };
 
-  // 4. Realtime Subscription for Messages
+  const fetchProjects = async (telegramId: string) => {
+    if (!supabase || isOfflineMode) return;
+    try {
+      const { data, error } = await supabase
+        .from('projects')
+        .select('*')
+        .eq('telegram_id', telegramId)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setProjects(data || []);
+    } catch (e) {
+      console.error("Fetch Projects Failed:", e);
+    }
+  };
+
+  // 4. Realtime Subscription for Messages AND Projects
   useEffect(() => {
     if (!supabase || !currentChatId || isOfflineMode) return;
 
+    // Messages Channel
     const channel = supabase
       .channel(`chat:${currentChatId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-          filter: `chat_id=eq.${currentChatId}`,
-        },
-        (payload) => {
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `chat_id=eq.${currentChatId}` }, (payload) => {
           const newMsg = payload.new;
-          
           setChats(prev => prev.map(chat => {
             if (chat.id === currentChatId) {
                const exists = chat.messages.some(m => m.content === newMsg.content && m.role === newMsg.role); 
@@ -219,9 +227,7 @@ const App: React.FC = () => {
                    return {
                        ...chat,
                        messages: [...chat.messages, {
-                           id: newMsg.id,
-                           role: newMsg.role,
-                           content: newMsg.content || '',
+                           id: newMsg.id, role: newMsg.role, content: newMsg.content || '',
                            timestamp: new Date(newMsg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                            attachments: newMsg.attachments || []
                        }]
@@ -232,17 +238,24 @@ const App: React.FC = () => {
           }));
         }
       )
-      .subscribe((status) => {
-         if (status === 'CHANNEL_ERROR') {
-             // Silent fail for realtime
-         }
-      });
+      .subscribe();
 
     return () => {
       supabase?.removeChannel(channel);
     };
   }, [currentChatId, isOfflineMode]);
 
+  // Projects Realtime
+  useEffect(() => {
+    if (!supabase || !activeTelegramId || isOfflineMode) return;
+    const channel = supabase
+      .channel(`projects:${activeTelegramId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'projects', filter: `telegram_id=eq.${activeTelegramId}` }, () => {
+         fetchProjects(activeTelegramId);
+      })
+      .subscribe();
+    return () => { supabase?.removeChannel(channel); };
+  }, [activeTelegramId, isOfflineMode]);
 
   // --- Scroll to bottom ---
   useEffect(() => {
@@ -252,20 +265,12 @@ const App: React.FC = () => {
   // --- Outside Click Handlers ---
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setIsModelDropdownOpen(false);
-      }
-      if (attachmentMenuRef.current && !attachmentMenuRef.current.contains(event.target as Node)) {
-        setIsAttachmentMenuOpen(false);
-      }
-      if (plusMenuRef.current && !plusMenuRef.current.contains(event.target as Node)) {
-        setIsPlusMenuOpen(false);
-      }
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) setIsModelDropdownOpen(false);
+      if (attachmentMenuRef.current && !attachmentMenuRef.current.contains(event.target as Node)) setIsAttachmentMenuOpen(false);
+      if (plusMenuRef.current && !plusMenuRef.current.contains(event.target as Node)) setIsPlusMenuOpen(false);
     }
     document.addEventListener("mousedown", handleClickOutside);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
+    return () => { document.removeEventListener("mousedown", handleClickOutside); };
   }, [dropdownRef, attachmentMenuRef, plusMenuRef]);
 
   // --- Logic ---
@@ -282,16 +287,79 @@ const App: React.FC = () => {
   };
 
   const handleRenameChat = async (chatId: string, newTitle: string) => {
-    setChats(prev => prev.map(chat => 
-      chat.id === chatId ? { ...chat, title: newTitle } : chat
-    ));
-    // DB Update
+    setChats(prev => prev.map(chat => chat.id === chatId ? { ...chat, title: newTitle } : chat));
     if (activeTelegramId && supabase && !isOfflineMode) {
-      supabase.from('chats').update({ title: newTitle }).eq('id', chatId).then(({error}) => {
-          if(error) console.warn("Rename failed:", error.message);
-      });
+      supabase.from('chats').update({ title: newTitle }).eq('id', chatId).then(({error}) => { if(error) console.warn("Rename failed:", error.message); });
     }
   };
+
+  // --- Project Logic ---
+
+  const handleCreateProject = async (name: string) => {
+      if (!activeTelegramId || !supabase || isOfflineMode) return;
+      const { error } = await supabase.from('projects').insert([{ telegram_id: activeTelegramId, name }]);
+      if (error) console.error("Create Project Error:", error);
+      else fetchProjects(activeTelegramId);
+  };
+
+  const handleSelectProject = (projectId: string | null) => {
+      setActiveProjectId(projectId);
+      setCurrentChatId(null); 
+  };
+
+  const handleDeleteProject = async (projectId: string) => {
+     if (!supabase || isOfflineMode) return;
+     
+     // 1. Update chats to remove project_id (move to general)
+     const { error: chatUpdateError } = await supabase
+        .from('chats')
+        .update({ project_id: null })
+        .eq('project_id', projectId);
+     
+     if (chatUpdateError) {
+         console.error("Error moving chats:", chatUpdateError);
+         return;
+     }
+
+     // 2. Delete the project
+     const { error } = await supabase.from('projects').delete().eq('id', projectId);
+     
+     if (error) {
+         console.error("Error deleting project:", error);
+     } else {
+         // Update Local State
+         setProjects(prev => prev.filter(p => p.id !== projectId));
+         // Move chats in local state to null project
+         setChats(prev => prev.map(c => c.project_id === projectId ? { ...c, project_id: null } : c));
+         
+         if (activeProjectId === projectId) setActiveProjectId(null);
+     }
+  };
+  
+  const handleRenameProject = async (projectId: string, name: string) => {
+      if (!supabase || isOfflineMode) return;
+      await supabase.from('projects').update({ name }).eq('id', projectId);
+      // Optimistic update
+      setProjects(prev => prev.map(p => p.id === projectId ? { ...p, name } : p));
+  };
+
+  const handleClearProjectChats = async (projectId: string) => {
+      if (!supabase || isOfflineMode) return;
+      await supabase.from('chats').delete().eq('project_id', projectId);
+      // Update local state
+      setChats(prev => prev.filter(c => c.project_id !== projectId));
+  };
+
+  const handleMoveChatToProject = async (chatId: string, projectId: string | null) => {
+      // Optimistic update
+      setChats(prev => prev.map(chat => chat.id === chatId ? { ...chat, project_id: projectId } : chat));
+
+      if (activeTelegramId && supabase && !isOfflineMode) {
+          const { error } = await supabase.from('chats').update({ project_id: projectId }).eq('id', chatId);
+          if (error) console.error("Move Chat Error:", error);
+      }
+  };
+
 
   const createChatIfNeeded = async (initialMessage: string): Promise<string> => {
     let chatToUpdateId = currentChatId;
@@ -300,17 +368,12 @@ const App: React.FC = () => {
       const title = initialMessage.length > 30 ? initialMessage.substring(0, 30) + '...' : initialMessage;
       
       if (activeTelegramId && supabase && !isOfflineMode) {
-        // Ensure user exists (Safe Upsert with Anon Key)
-        const { error: userError } = await supabase.from('users').upsert(
-             { telegram_id: activeTelegramId, first_name: settings.firstName || 'User' }, 
-             { onConflict: 'telegram_id' }
-        );
-        // Ignore userError here, let chat creation fail naturally if so
+        const payload: any = { telegram_id: activeTelegramId, title: title };
+        if (activeProjectId) payload.project_id = activeProjectId;
 
-        // Attempt DB Create
         const { data, error } = await supabase
           .from('chats')
-          .insert([{ telegram_id: activeTelegramId, title: title }])
+          .insert([payload])
           .select()
           .single();
           
@@ -320,26 +383,24 @@ const App: React.FC = () => {
             id: data.id,
             title: data.title,
             date: new Date(),
+            project_id: activeProjectId || null,
             messages: []
           };
           setChats(prev => [newChat, ...prev]);
           setCurrentChatId(data.id);
         } else {
-          // Fallback to local if DB fails
           if (error.code !== 'PGRST002' && error.code !== 'PGRST000') {
               console.error("DB Create Error", JSON.stringify(error, null, 2));
           }
           setIsOfflineMode(true);
-          
           const tempId = generateId();
-          setChats(prev => [{ id: tempId, title, date: new Date(), messages: [] }, ...prev]);
+          setChats(prev => [{ id: tempId, title, date: new Date(), messages: [], project_id: activeProjectId }, ...prev]);
           setCurrentChatId(tempId);
           return tempId;
         }
       } else {
-        // Offline Fallback
         const tempId = generateId();
-        setChats(prev => [{ id: tempId, title, date: new Date(), messages: [] }, ...prev]);
+        setChats(prev => [{ id: tempId, title, date: new Date(), messages: [], project_id: activeProjectId }, ...prev]);
         setCurrentChatId(tempId);
         return tempId;
       }
@@ -352,21 +413,13 @@ const App: React.FC = () => {
   const handleSendMessage = async (text: string = inputMessage) => {
     const hasText = !!text.trim();
     const hasAttachments = draftAttachments.length > 0;
-
     if ((!hasText && !hasAttachments) || isLoading) return;
 
     let url = settings.webhookUrl?.trim();
     if (!url) { setIsSettingsOpen(true); return; }
     if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
 
-    // Mixed Content Check
-    if (window.location.protocol === 'https:' && url.startsWith('http:')) {
-      console.warn("WARNING: Attempting to fetch HTTP webhook from HTTPS page. This will likely fail.");
-    }
-
     const chatTitleSource = hasText ? text : (draftAttachments[0]?.name || 'File Upload');
-    
-    // 1. Get Chat ID (Handles local fallback if DB down)
     const chatToUpdateId = await createChatIfNeeded(chatTitleSource);
 
     const userMsgId = generateId(); 
@@ -380,26 +433,10 @@ const App: React.FC = () => {
       attachments: attachmentsData.length > 0 ? attachmentsData : undefined,
     };
 
-    // Optimistic UI
-    setChats(prev => prev.map(c => 
-      c.id === chatToUpdateId ? { ...c, messages: [...c.messages, newMessage] } : c
-    ));
+    setChats(prev => prev.map(c => c.id === chatToUpdateId ? { ...c, messages: [...c.messages, newMessage] } : c));
 
-    // Save to DB (Non-blocking, if online)
     if (activeTelegramId && supabase && !isOfflineMode) {
-      supabase.from('messages').insert({
-        chat_id: chatToUpdateId,
-        role: 'user',
-        content: text,
-        attachments: attachmentsData
-      }).then(({ error }) => {
-         if(error) {
-             if (error.code !== 'PGRST002' && error.code !== 'PGRST000') {
-                console.warn("Supabase msg save error:", error.message);
-             }
-             setIsOfflineMode(true);
-         }
-      });
+      supabase.from('messages').insert({ chat_id: chatToUpdateId, role: 'user', content: text, attachments: attachmentsData }).then(({ error }) => { if(error && !isOfflineMode) console.warn("Supabase msg save error:", error.message); });
     }
 
     setInputMessage('');
@@ -411,14 +448,8 @@ const App: React.FC = () => {
     const timeoutId = setTimeout(() => controller.abort(), 120000); 
 
     try {
-      const headers: any = { 
-        'Content-Type': 'application/json',
-        'Accept': 'application/json' 
-      };
-      
-      if (settings.username && settings.password) {
-        headers['Authorization'] = `Basic ${toBase64(`${settings.username}:${settings.password}`)}`;
-      }
+      const headers: any = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+      if (settings.username && settings.password) headers['Authorization'] = `Basic ${toBase64(`${settings.username}:${settings.password}`)}`;
 
       const bodyPayload: any = {
         model: selectedModelId,
@@ -426,14 +457,11 @@ const App: React.FC = () => {
         chat_id: chatToUpdateId,
         firstName: settings.firstName,
         telegramUsername: settings.telegramUsername,
+        project_id: activeProjectId,
       };
 
-      // Add Mode Flags
-      if (activeMode === 'websearch') {
-        bodyPayload.Websearch = "active";
-      } else if (activeMode === 'deepresearch') {
-        bodyPayload.DeepResearch = "active";
-      }
+      if (activeMode === 'websearch') bodyPayload.Websearch = "active";
+      else if (activeMode === 'deepresearch') bodyPayload.DeepResearch = "active";
 
       if (attachmentsData.length > 0) {
         bodyPayload.files = attachmentsData.map(att => ({
@@ -446,177 +474,42 @@ const App: React.FC = () => {
         }));
       }
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify(bodyPayload),
-        mode: 'cors',
-        signal: controller.signal,
-        credentials: 'omit',
-      });
-
+      const response = await fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(bodyPayload), mode: 'cors', signal: controller.signal, credentials: 'omit' });
       clearTimeout(timeoutId);
-
       if (!response.ok) throw new Error(`Server error: ${response.status}`);
 
       const responseText = await response.text();
       let responseData: any = {};
-      try {
-        if (responseText.trim()) responseData = JSON.parse(responseText);
-      } catch (e) {
-        responseData = { output: responseText };
-      }
+      try { if (responseText.trim()) responseData = JSON.parse(responseText); } catch (e) { responseData = { output: responseText }; }
 
       const aiContent = responseData.output || responseData.message || responseData.text || (typeof responseData === 'string' ? responseData : JSON.stringify(responseData));
+      const aiMessage: Message = { id: generateId(), role: 'ai', content: aiContent, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
 
-      const aiMessage: Message = {
-        id: generateId(),
-        role: 'ai',
-        content: aiContent,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-
-      setChats(prev => prev.map(c => 
-        c.id === chatToUpdateId ? { ...c, messages: [...c.messages, aiMessage] } : c
-      ));
-
-      if (activeTelegramId && supabase && !isOfflineMode) {
-        await supabase.from('messages').insert({
-          chat_id: chatToUpdateId,
-          role: 'ai',
-          content: aiContent
-        });
-      }
+      setChats(prev => prev.map(c => c.id === chatToUpdateId ? { ...c, messages: [...c.messages, aiMessage] } : c));
+      if (activeTelegramId && supabase && !isOfflineMode) await supabase.from('messages').insert({ chat_id: chatToUpdateId, role: 'ai', content: aiContent });
 
     } catch (error: any) {
       console.error("Webhook error:", error);
       let errorContent = `**Error:** ${error.message || 'Failed to connect'}`;
+      if (error.name === 'AbortError') errorContent = "**Error:** Request timed out (120s). n8n took too long.";
+      else if (error.message.includes('500')) errorContent += "\n\n*Server Error 500: n8n crashed.*";
+      else if (error.name === 'TypeError' && error.message === 'Failed to fetch') errorContent += "\n\n*Network Error.*";
       
-      if (error.name === 'AbortError') {
-         errorContent = "**Error:** Request timed out (120s). n8n took too long to reply.";
-      } else if (error.message.includes('500')) {
-          errorContent += "\n\n*Server Error 500: n8n crashed. Check your n8n execution logs.*";
-      } else if (error.message.includes('403')) {
-          errorContent += "\n\n*Server Error 403 (Forbidden):* Check Settings credentials.";
-      } else if (error.name === 'TypeError' && error.message === 'Failed to fetch') {
-          errorContent += "\n\n*Network/CORS Error:* The browser blocked the request. \n1. Is your n8n URL `https://`? (HTTP is blocked).\n2. Does your n8n server respond with `Access-Control-Allow-Origin: *`?\n3. Is your file size too large for your proxy?";
-      }
-
-      const errorMsg: Message = {
-        id: generateId(),
-        role: 'ai',
-        content: errorContent,
-        timestamp: new Date().toLocaleTimeString()
-      };
-      setChats(prev => prev.map(c => 
-        c.id === chatToUpdateId ? { ...c, messages: [...c.messages, errorMsg] } : c
-      ));
-    } finally {
-      setIsLoading(false);
-    }
+      const errorMsg: Message = { id: generateId(), role: 'ai', content: errorContent, timestamp: new Date().toLocaleTimeString() };
+      setChats(prev => prev.map(c => c.id === chatToUpdateId ? { ...c, messages: [...c.messages, errorMsg] } : c));
+    } finally { setIsLoading(false); }
   };
 
-  // --- File Upload Handlers ---
-
-  const checkModeAndAttach = () => {
-      if (activeMode) {
-          setUploadError('Чтобы прикрепить файл, сначала отключите режим “Веб-поиск” или “Глубокое исследование”, а затем повторите попытку.');
-          return false;
-      }
-      return true;
-  };
-
-  const handleMenuOptionClick = (type: 'file' | 'image' | 'camera') => {
-    if (!checkModeAndAttach()) return;
-    
-    setIsAttachmentMenuOpen(false);
-    if (type === 'file' && fileInputRef.current) fileInputRef.current.click();
-    if (type === 'image' && imageInputRef.current) imageInputRef.current.click();
-    if (type === 'camera' && cameraInputRef.current) cameraInputRef.current.click();
-  };
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: 'file' | 'image' | 'camera') => {
-    if (!checkModeAndAttach()) {
-        e.target.value = '';
-        return;
-    }
-
-    const files = e.target.files ? Array.from(e.target.files) : [];
-    if (files.length > 0) {
-        e.target.value = ''; 
-        await processSelectedFiles(files, type);
-    }
-  };
-
-  const processSelectedFiles = async (files: File[], sourceOverride?: 'file' | 'image' | 'camera') => {
-    if (files.length === 0) return;
-    if (files.length > 5) { setUploadError("Max 5 files"); return; }
-
-    const validFiles = files.filter(f => f.size <= MAX_FILE_SIZE && ALLOWED_EXTENSIONS.includes('.' + f.name.split('.').pop()?.toLowerCase()));
-    
-    if (validFiles.length < files.length) setUploadError("Some files were invalid (Check size < 10MB or type)");
-
-    const newAttachments = await Promise.all(validFiles.map(async (file) => {
-       const base64Data = await new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.readAsDataURL(file);
-          reader.onload = () => resolve(reader.result as string);
-       });
-       
-       let attachmentType: 'file' | 'image' = file.type.startsWith('image/') ? 'image' : 'file';
-       if (sourceOverride === 'camera') attachmentType = 'image';
-
-       return {
-          type: attachmentType,
-          name: file.name,
-          size: file.size,
-          mimeType: file.type,
-          data: base64Data,
-          sourceType: sourceOverride || 'file',
-          uploadStatus: 'idle',
-          uploadProgress: 100
-       } as Attachment;
-    }));
-    
-    setDraftAttachments(prev => [...prev, ...newAttachments]);
-  };
-
-  const handleDragEnter = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-      setIsDragging(false);
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!isDragging) setIsDragging(true);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-    
-    if (!checkModeAndAttach()) return;
-
-    processSelectedFiles(Array.from(e.dataTransfer.files));
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
-  };
+  const handleMenuOptionClick = (type: 'file' | 'image' | 'camera') => { if (!checkModeAndAttach()) return; setIsAttachmentMenuOpen(false); if (type === 'file' && fileInputRef.current) fileInputRef.current.click(); if (type === 'image' && imageInputRef.current) imageInputRef.current.click(); if (type === 'camera' && cameraInputRef.current) cameraInputRef.current.click(); };
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: 'file' | 'image' | 'camera') => { if (!checkModeAndAttach()) { e.target.value = ''; return; } const files = e.target.files ? Array.from(e.target.files) : []; if (files.length > 0) { e.target.value = ''; await processSelectedFiles(files, type); } };
+  const processSelectedFiles = async (files: File[], sourceOverride?: 'file' | 'image' | 'camera') => { if (files.length === 0) return; if (files.length > 5) { setUploadError("Max 5 files"); return; } const validFiles = files.filter(f => f.size <= MAX_FILE_SIZE && ALLOWED_EXTENSIONS.includes('.' + f.name.split('.').pop()?.toLowerCase())); if (validFiles.length < files.length) setUploadError("Some files were invalid"); const newAttachments = await Promise.all(validFiles.map(async (file) => { const base64Data = await new Promise<string>((resolve) => { const reader = new FileReader(); reader.readAsDataURL(file); reader.onload = () => resolve(reader.result as string); }); let attachmentType: 'file' | 'image' = file.type.startsWith('image/') ? 'image' : 'file'; if (sourceOverride === 'camera') attachmentType = 'image'; return { type: attachmentType, name: file.name, size: file.size, mimeType: file.type, data: base64Data, sourceType: sourceOverride || 'file', uploadStatus: 'idle', uploadProgress: 100 } as Attachment; })); setDraftAttachments(prev => [...prev, ...newAttachments]); };
+  
+  const handleDragEnter = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setIsDragging(true); };
+  const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); if (!e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragging(false); } };
+  const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); if (!isDragging) setIsDragging(true); };
+  const handleDrop = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setIsDragging(false); if (!checkModeAndAttach()) return; processSelectedFiles(Array.from(e.dataTransfer.files)); };
+  const handleKeyDown = (e: React.KeyboardEvent) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } };
+  const checkModeAndAttach = () => { if (activeMode) { setUploadError('Чтобы прикрепить файл, сначала отключите режим “Веб-поиск” или “Глубокое исследование”, а затем повторите попытку.'); return false; } return true; };
 
   return (
     <div className="flex h-screen bg-white dark:bg-[#212121] transition-colors duration-200">
@@ -626,187 +519,67 @@ const App: React.FC = () => {
 
       <Sidebar 
         chats={chats}
+        projects={projects}
+        activeProjectId={activeProjectId}
         currentChatId={currentChatId}
         onSelectChat={(id) => { setCurrentChatId(id); setIsSidebarOpen(false); }}
         onNewChat={handleNewChat}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onRenameChat={handleRenameChat}
+        onCreateProject={handleCreateProject}
+        onSelectProject={handleSelectProject}
+        onDeleteProject={handleDeleteProject}
+        onRenameProject={handleRenameProject}
+        onClearProjectChats={handleClearProjectChats}
+        onMoveChatToProject={handleMoveChatToProject}
         userName={settings.telegramUsername || 'Гость'}
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
       />
 
       <div className="flex-1 flex flex-col h-full relative w-full">
-        {!settings.webhookUrl && (
-          <div onClick={() => setIsSettingsOpen(true)} className="bg-orange-50 dark:bg-orange-900/30 border-b border-orange-100 dark:border-orange-800 p-2 text-center text-xs md:text-sm text-orange-800 dark:text-orange-200 cursor-pointer absolute w-full top-12 z-20">
-            Нажмите настройки чтобы подключить Webhook.
-          </div>
-        )}
-        
-        {settings.webhookUrl && !activeTelegramId && (
-           <div onClick={() => setIsSettingsOpen(true)} className="bg-blue-50 dark:bg-blue-900/30 border-b border-blue-100 dark:border-blue-800 p-2 text-center text-xs md:text-sm text-blue-800 dark:text-blue-200 cursor-pointer absolute w-full top-12 z-20">
-             Введите <b>Telegram ID</b> в настройках для сохранения истории.
-           </div>
-        )}
-        
-        {/* Offline Mode Warning - Non-intrusive */}
-        {isOfflineMode && (
-            <div className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 p-1 text-center text-[10px] text-gray-400 absolute w-full top-12 z-10">
-                Offline mode: History sync unavailable.
-            </div>
-        )}
+        {!settings.webhookUrl && <div onClick={() => setIsSettingsOpen(true)} className="bg-orange-50 dark:bg-orange-900/30 border-b border-orange-100 dark:border-orange-800 p-2 text-center text-xs md:text-sm text-orange-800 dark:text-orange-200 cursor-pointer absolute w-full top-12 z-20">Нажмите настройки чтобы подключить Webhook.</div>}
+        {settings.webhookUrl && !activeTelegramId && <div onClick={() => setIsSettingsOpen(true)} className="bg-blue-50 dark:bg-blue-900/30 border-b border-blue-100 dark:border-blue-800 p-2 text-center text-xs md:text-sm text-blue-800 dark:text-blue-200 cursor-pointer absolute w-full top-12 z-20">Введите <b>Telegram ID</b> в настройках для сохранения истории.</div>}
+        {isOfflineMode && <div className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 p-1 text-center text-[10px] text-gray-400 absolute w-full top-12 z-10">Offline mode: History sync unavailable.</div>}
 
         <div className="h-12 flex items-center justify-between px-4 sticky top-0 bg-white/80 dark:bg-[#212121]/80 backdrop-blur-md z-30 transition-colors">
-          <div className="md:hidden">
-            <button onClick={() => setIsSidebarOpen(true)} className="p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-[#3d3d3d] rounded-md"><IconMenu className="w-5 h-5" /></button>
-          </div>
+          <div className="md:hidden"><button onClick={() => setIsSidebarOpen(true)} className="p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-[#3d3d3d] rounded-md"><IconMenu className="w-5 h-5" /></button></div>
           <div className="relative mx-auto" ref={dropdownRef}>
-            <button onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-[#3d3d3d] transition-colors text-sm font-medium text-gray-600 dark:text-gray-300">
-              {selectedModel.label} <IconChevronDown className={`w-4 h-4 transition-transform duration-200 ${isModelDropdownOpen ? 'rotate-180' : ''}`} />
-            </button>
-            {isModelDropdownOpen && (
-              <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-64 bg-white dark:bg-[#2d2d2d] rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 py-2 animate-in fade-in zoom-in-95 duration-100 max-h-[80vh] overflow-y-auto">
-                <div>{MODEL_OPTIONS.map(model => (
-                    <button key={model.id} onClick={() => { setSelectedModelId(model.id); setIsModelDropdownOpen(false); }} className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-50 dark:hover:bg-[#3d3d3d] transition-colors flex justify-between items-center ${selectedModelId === model.id ? 'text-gray-900 dark:text-white font-medium bg-gray-50 dark:bg-[#3d3d3d]' : 'text-gray-600 dark:text-gray-400'}`}>{model.label}{selectedModelId === model.id && <span className="text-gray-900 dark:text-white">✓</span>}</button>
-                  ))}
-                </div>
-              </div>
-            )}
+            <button onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-[#3d3d3d] transition-colors text-sm font-medium text-gray-600 dark:text-gray-300">{selectedModel.label} <IconChevronDown className={`w-4 h-4 transition-transform duration-200 ${isModelDropdownOpen ? 'rotate-180' : ''}`} /></button>
+            {isModelDropdownOpen && <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-64 bg-white dark:bg-[#2d2d2d] rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 py-2 animate-in fade-in zoom-in-95 duration-100 max-h-[80vh] overflow-y-auto"><div>{MODEL_OPTIONS.map(model => (<button key={model.id} onClick={() => { setSelectedModelId(model.id); setIsModelDropdownOpen(false); }} className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-50 dark:hover:bg-[#3d3d3d] transition-colors flex justify-between items-center ${selectedModelId === model.id ? 'text-gray-900 dark:text-white font-medium bg-gray-50 dark:bg-[#3d3d3d]' : 'text-gray-600 dark:text-gray-400'}`}>{model.label}{selectedModelId === model.id && <span className="text-gray-900 dark:text-white">✓</span>}</button>))}</div></div>}
           </div>
           <div className="w-10 md:w-0"></div>
         </div>
 
         <div className="flex-1 overflow-y-auto relative scroll-smooth pb-32">
-          {!currentChat ? (
-            <div className="h-full flex flex-col items-center justify-center px-4">
-              <div className="w-16 h-16 bg-white dark:bg-[#2d2d2d] border border-gray-200 dark:border-gray-700 rounded-full flex items-center justify-center mb-6 shadow-sm"><IconRobot className="w-8 h-8 text-gray-800 dark:text-gray-200" /></div>
-              <h1 className="text-2xl font-semibold text-gray-800 dark:text-gray-100 mb-12 text-center">Чем я могу вам помочь сегодня?</h1>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-2xl">
-                {SUGGESTION_CARDS.map((card, idx) => (
-                  <button key={idx} onClick={() => handleSendMessage(card.title)} className="text-left p-4 border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-gray-50 dark:hover:bg-[#2d2d2d] transition-colors">
-                    <div className="font-medium text-gray-900 dark:text-gray-100 text-sm mb-1">{card.title}</div>
-                    <div className="text-gray-500 dark:text-gray-400 text-xs">{card.subtitle}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="max-w-3xl mx-auto px-4 py-8">
-              {currentChat.messages.map(msg => <MessageBubble key={msg.id} message={msg} />)}
-              {isLoading && (
-                <div className="flex w-full mb-6 animate-in fade-in duration-300">
-                   <div className="w-8 h-8 flex-shrink-0 mr-4 mt-1 flex items-center justify-center"><div className="w-full h-full rounded-full bg-white dark:bg-[#2d2d2d] border border-gray-200 dark:border-gray-700 flex items-center justify-center"><IconRobot className="w-4 h-4 text-gray-800 dark:text-gray-200" /></div></div>
-                   <div className="flex-1 min-w-0"><div className="bg-gray-50 dark:bg-[#2d2d2d] rounded-xl px-4 py-3 border border-gray-100/50 dark:border-gray-700/50 w-fit"><div className="flex items-center space-x-1 h-6"><div className="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div><div className="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div><div className="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div></div></div></div>
-                </div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
+          {!currentChat ? <div className="h-full flex flex-col items-center justify-center px-4"><div className="w-16 h-16 bg-white dark:bg-[#2d2d2d] border border-gray-200 dark:border-gray-700 rounded-full flex items-center justify-center mb-6 shadow-sm"><IconRobot className="w-8 h-8 text-gray-800 dark:text-gray-200" /></div><h1 className="text-2xl font-semibold text-gray-800 dark:text-gray-100 mb-12 text-center">Чем я могу вам помочь сегодня?</h1><div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-2xl">{SUGGESTION_CARDS.map((card, idx) => (<button key={idx} onClick={() => handleSendMessage(card.title)} className="text-left p-4 border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-gray-50 dark:hover:bg-[#2d2d2d] transition-colors"><div className="font-medium text-gray-900 dark:text-gray-100 text-sm mb-1">{card.title}</div><div className="text-gray-500 dark:text-gray-400 text-xs">{card.subtitle}</div></button>))}</div></div> : <div className="max-w-3xl mx-auto px-4 py-8">{currentChat.messages.map(msg => <MessageBubble key={msg.id} message={msg} />)}{isLoading && <div className="flex w-full mb-6 animate-in fade-in duration-300"><div className="w-8 h-8 flex-shrink-0 mr-4 mt-1 flex items-center justify-center"><div className="w-full h-full rounded-full bg-white dark:bg-[#2d2d2d] border border-gray-200 dark:border-gray-700 flex items-center justify-center"><IconRobot className="w-4 h-4 text-gray-800 dark:text-gray-200" /></div></div><div className="flex-1 min-w-0"><div className="bg-gray-50 dark:bg-[#2d2d2d] rounded-xl px-4 py-3 border border-gray-100/50 dark:border-gray-700/50 w-fit"><div className="flex items-center space-x-1 h-6"><div className="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div><div className="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div><div className="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div></div></div></div></div>}<div ref={messagesEndRef} /></div>}
         </div>
 
         <div className="absolute bottom-0 left-0 w-full bg-white dark:bg-[#212121] p-4 transition-colors">
           <div className="max-w-3xl mx-auto relative">
-            {/* Upload Error Message */}
-            {uploadError && (
-              <div className="absolute -top-12 left-0 right-0 bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-300 text-xs px-4 py-2 rounded-lg border border-red-100 dark:border-red-800 shadow-sm animate-in fade-in slide-in-from-bottom-2">
-                {uploadError}
-              </div>
-            )}
-
-            {/* Main Input Container */}
-            <div className="flex items-end gap-3">
-                
-                {/* Plus Button Wrapper */}
+            {uploadError && <div className="absolute -top-12 left-0 right-0 bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-300 text-xs px-4 py-2 rounded-lg border border-red-100 dark:border-red-800 shadow-sm animate-in fade-in slide-in-from-bottom-2">{uploadError}</div>}
+            
+            <div className={`flex items-end gap-3`}>
                 <div className="relative flex-shrink-0" ref={plusMenuRef}>
-                    {/* Floating Menu - Expanded width (w-80) */}
                     {isPlusMenuOpen && (
                         <div className="absolute bottom-full left-0 mb-3 w-80 bg-white dark:bg-[#2d2d2d] rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 p-2 animate-in slide-in-from-bottom-2 fade-in duration-200 z-50 origin-bottom-left">
-                            <button 
-                                onClick={() => { setActiveMode(activeMode === 'websearch' ? null : 'websearch'); setIsPlusMenuOpen(false); }}
-                                className={`w-full flex items-center gap-3 px-3 py-3 text-sm rounded-xl transition-all ${activeMode === 'websearch' ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' : 'text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#3d3d3d]'}`}
-                            >
-                                <div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-[#3d3d3d] flex items-center justify-center flex-shrink-0">
-                                    <IconGlobe className="w-4 h-4" />
-                                </div>
-                                <span className="font-medium text-left">веб-поиск</span>
-                            </button>
-                            
-                            <button 
-                                onClick={() => { setActiveMode(activeMode === 'deepresearch' ? null : 'deepresearch'); setIsPlusMenuOpen(false); }}
-                                className={`w-full flex items-center gap-3 px-3 py-3 text-sm rounded-xl transition-all mt-1 ${activeMode === 'deepresearch' ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' : 'text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#3d3d3d]'}`}
-                            >
-                                <div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-[#3d3d3d] flex items-center justify-center flex-shrink-0">
-                                    <IconSparkles className="w-4 h-4" />
-                                </div>
-                                <span className="font-medium text-left">глубокое исследование</span>
-                            </button>
+                            <button onClick={() => { setActiveMode(activeMode === 'websearch' ? null : 'websearch'); setIsPlusMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3 py-3 text-sm rounded-xl transition-all ${activeMode === 'websearch' ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' : 'text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#3d3d3d]'}`}><div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-[#3d3d3d] flex items-center justify-center flex-shrink-0"><IconGlobe className="w-4 h-4" /></div><span className="font-medium text-left">веб-поиск</span></button>
+                            <button onClick={() => { setActiveMode(activeMode === 'deepresearch' ? null : 'deepresearch'); setIsPlusMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3 py-3 text-sm rounded-xl transition-all mt-1 ${activeMode === 'deepresearch' ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' : 'text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#3d3d3d]'}`}><div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-[#3d3d3d] flex items-center justify-center flex-shrink-0"><IconSparkles className="w-4 h-4" /></div><span className="font-medium text-left">глубокое исследование</span></button>
                         </div>
                     )}
-
-                    {/* Circular Plus Button */}
-                    <button 
-                        onClick={() => setIsPlusMenuOpen(!isPlusMenuOpen)}
-                        className={`w-10 h-10 rounded-full bg-white dark:bg-[#2F2F2F] border border-gray-200 dark:border-gray-700 shadow-md flex items-center justify-center text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:scale-105 active:scale-95 transition-all duration-200 ${isPlusMenuOpen ? 'ring-2 ring-gray-200 dark:ring-gray-600' : ''}`}
-                    >
-                        <IconPlus className={`w-5 h-5 transition-transform duration-200 ${isPlusMenuOpen ? 'rotate-45' : ''}`} />
-                    </button>
+                    <button onClick={() => setIsPlusMenuOpen(!isPlusMenuOpen)} className={`w-10 h-10 rounded-full bg-white dark:bg-[#2F2F2F] border border-gray-200 dark:border-gray-700 shadow-md flex items-center justify-center text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:scale-105 active:scale-95 transition-all duration-200 ${isPlusMenuOpen ? 'ring-2 ring-gray-200 dark:ring-gray-600' : ''}`}><IconPlus className={`w-5 h-5 transition-transform duration-200 ${isPlusMenuOpen ? 'rotate-45' : ''}`} /></button>
                 </div>
 
-                {/* Input Box Container */}
-                <div 
-                    className={`flex-1 bg-white dark:bg-[#2F2F2F] border shadow-sm rounded-2xl transition-all focus-within:shadow-md relative flex flex-col ${uploadError ? 'border-red-300 dark:border-red-800' : 'border-gray-200 dark:border-gray-700 focus-within:border-gray-300 dark:focus-within:border-gray-600'} ${isDragging ? 'border-blue-500 ring-2 ring-blue-100 dark:ring-blue-900 bg-blue-50 dark:bg-blue-900/20' : ''}`}
-                    onDragEnter={handleDragEnter}
-                    onDragLeave={handleDragLeave}
-                    onDragOver={handleDragOver}
-                    onDrop={handleDrop}
-                >
-                    {/* Drag Overlay */}
-                    {isDragging && (
-                        <div className="absolute inset-0 z-20 flex items-center justify-center bg-blue-50/90 dark:bg-[#2F2F2F]/90 backdrop-blur-sm rounded-2xl border-2 border-blue-500 border-dashed animate-in fade-in duration-200 pointer-events-none">
-                        <div className="text-blue-600 dark:text-blue-400 font-medium flex items-center gap-2"><IconFile className="w-5 h-5" /><span>Отпустите файлы здесь</span></div>
-                        </div>
-                    )}
-
-                    {/* Mode Pill */}
-                    {activeMode && (
-                        <div className="px-3 pt-3 pb-1 animate-in slide-in-from-bottom-2 fade-in duration-200">
-                            <div className="inline-flex items-center gap-2 px-3 py-1 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 rounded-full text-xs font-medium border border-blue-100 dark:border-blue-800/50">
-                                {activeMode === 'websearch' ? <IconGlobe className="w-3 h-3" /> : <IconSparkles className="w-3 h-3" />}
-                                <span>{activeMode === 'websearch' ? 'веб-поиск' : 'глубокое исследование'}</span>
-                                <button onClick={() => setActiveMode(null)} className="hover:bg-blue-100 dark:hover:bg-blue-800 rounded-full p-0.5 ml-1 transition-colors">
-                                    <IconX className="w-3 h-3" />
-                                </button>
-                            </div>
-                        </div>
-                    )}
-              
-                    {/* Draft Attachments */}
-                    {draftAttachments.length > 0 && (
-                        <div className="px-3 pt-3 pb-2 border-b border-gray-100 dark:border-gray-700 flex items-center bg-gray-50/50 dark:bg-[#2d2d2d] rounded-t-2xl overflow-x-auto gap-3 scrollbar-hide">
-                        {draftAttachments.map((att, index) => (
-                            <div key={index} className="flex-shrink-0 relative group">
-                                <div className="flex items-center gap-2 bg-white dark:bg-[#3d3d3d] border border-gray-200 dark:border-gray-600 rounded-lg p-2 shadow-sm pr-8 relative overflow-hidden">
-                                {att.type === 'image' && att.data ? <div className="w-8 h-8 rounded bg-gray-100 dark:bg-gray-700 overflow-hidden flex-shrink-0"><img src={att.data} alt="preview" className="w-full h-full object-cover" /></div> : <div className="w-8 h-8 bg-gray-100 dark:bg-gray-700 rounded flex items-center justify-center flex-shrink-0"><IconFile className="w-4 h-4 text-gray-500 dark:text-gray-400" /></div>}
-                                <div className="max-w-[120px]"><div className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate" title={att.name}>{att.name}</div><div className="text-[10px] text-gray-400 dark:text-gray-500">{(att.size ? (att.size / 1024).toFixed(1) + ' KB' : '')}</div></div>
-                                </div>
-                                <button onClick={() => setDraftAttachments(prev => prev.filter((_, i) => i !== index))} className="absolute -top-1 -right-1 bg-white dark:bg-[#3d3d3d] border border-gray-200 dark:border-gray-600 rounded-full p-1 text-gray-400 hover:text-red-500 shadow-sm transition-colors z-10"><IconX className="w-3 h-3" /></button>
-                            </div>
-                        ))}
-                        </div>
-                    )}
+                <div className={`flex-1 bg-white dark:bg-[#2F2F2F] border shadow-sm rounded-2xl transition-all focus-within:shadow-md relative flex flex-col ${uploadError ? 'border-red-300 dark:border-red-800' : 'border-gray-200 dark:border-gray-700 focus-within:border-gray-300 dark:focus-within:border-gray-600'} ${isDragging ? 'border-blue-500 ring-2 ring-blue-100 dark:ring-blue-900 bg-blue-50 dark:bg-blue-900/20' : ''}`} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDragOver={handleDragOver} onDrop={handleDrop}>
+                    {isDragging && <div className="absolute inset-0 z-20 flex items-center justify-center bg-blue-50/90 dark:bg-[#2F2F2F]/90 backdrop-blur-sm rounded-2xl border-2 border-blue-500 border-dashed animate-in fade-in duration-200 pointer-events-none"><div className="text-blue-600 dark:text-blue-400 font-medium flex items-center gap-2"><IconFile className="w-5 h-5" /><span>Отпустите файлы здесь</span></div></div>}
+                    
+                    {activeMode && (<div className="px-3 pt-3 pb-1 animate-in slide-in-from-bottom-2 fade-in duration-200"><div className="inline-flex items-center gap-2 px-3 py-1 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 rounded-full text-xs font-medium border border-blue-100 dark:border-blue-800/50">{activeMode === 'websearch' ? <IconGlobe className="w-3 h-3" /> : <IconSparkles className="w-3 h-3" />}<span>{activeMode === 'websearch' ? 'веб-поиск' : 'глубокое исследование'}</span><button onClick={() => setActiveMode(null)} className="hover:bg-blue-100 dark:hover:bg-blue-800 rounded-full p-0.5 ml-1 transition-colors"><IconX className="w-3 h-3" /></button></div></div>)}
+                    {draftAttachments.length > 0 && <div className="px-3 pt-3 pb-2 border-b border-gray-100 dark:border-gray-700 flex items-center bg-gray-50/50 dark:bg-[#2d2d2d] rounded-t-2xl overflow-x-auto gap-3 scrollbar-hide">{draftAttachments.map((att, index) => (<div key={index} className="flex-shrink-0 relative group"><div className="flex items-center gap-2 bg-white dark:bg-[#3d3d3d] border border-gray-200 dark:border-gray-600 rounded-lg p-2 shadow-sm pr-8 relative overflow-hidden">{att.type === 'image' && att.data ? <div className="w-8 h-8 rounded bg-gray-100 dark:bg-gray-700 overflow-hidden flex-shrink-0"><img src={att.data} alt="preview" className="w-full h-full object-cover" /></div> : <div className="w-8 h-8 bg-gray-100 dark:bg-gray-700 rounded flex items-center justify-center flex-shrink-0"><IconFile className="w-4 h-4 text-gray-500 dark:text-gray-400" /></div>}<div className="max-w-[120px]"><div className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate" title={att.name}>{att.name}</div><div className="text-[10px] text-gray-400 dark:text-gray-500">{(att.size ? (att.size / 1024).toFixed(1) + ' KB' : '')}</div></div></div><button onClick={() => setDraftAttachments(prev => prev.filter((_, i) => i !== index))} className="absolute -top-1 -right-1 bg-white dark:bg-[#3d3d3d] border border-gray-200 dark:border-gray-600 rounded-full p-1 text-gray-400 hover:text-red-500 shadow-sm transition-colors z-10"><IconX className="w-3 h-3" /></button></div>))}</div>}
 
                     <div className="flex items-end px-3 py-3 w-full">
-                        {/* Attachment Button */}
                         <div className="relative" ref={attachmentMenuRef}>
                         <button onClick={() => setIsAttachmentMenuOpen(!isAttachmentMenuOpen)} className={`p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors rounded-lg hover:bg-gray-100 dark:hover:bg-[#3d3d3d] mb-[2px] ${activeMode ? 'opacity-50 cursor-not-allowed' : ''}`} disabled={!!activeMode}><IconPaperclip className="w-5 h-5" /></button>
-                        {isAttachmentMenuOpen && !activeMode && (
-                            <div className="absolute bottom-full left-0 mb-2 w-80 bg-white dark:bg-[#2d2d2d] rounded-xl shadow-lg border border-gray-100 dark:border-gray-700 p-1 animate-in slide-in-from-bottom-2 fade-in duration-200 z-50">
-                            <button onClick={() => handleMenuOptionClick('file')} className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#3d3d3d] rounded-lg transition-colors text-left"><div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-[#3d3d3d] flex items-center justify-center flex-shrink-0"><IconFile className="w-4 h-4 text-gray-600 dark:text-gray-400" /></div>Добавить файл</button>
-                            <button onClick={() => handleMenuOptionClick('image')} className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#3d3d3d] rounded-lg transition-colors text-left"><div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-[#3d3d3d] flex items-center justify-center flex-shrink-0"><IconImage className="w-4 h-4 text-gray-600 dark:text-gray-400" /></div>Добавить изображение</button>
-                            <button onClick={() => handleMenuOptionClick('camera')} className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#3d3d3d] rounded-lg transition-colors text-left md:hidden"><div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-[#3d3d3d] flex items-center justify-center flex-shrink-0"><IconCamera className="w-4 h-4 text-gray-600 dark:text-gray-400" /></div>Сделать снимок</button>
-                            <div className="mt-2 pt-2 border-t border-gray-100 dark:border-gray-700 px-3 pb-2"><p className="text-[10px] text-gray-400 leading-tight">Допустимые типы файлов: PDF, MD, TXT, DOC, XLS, JPG, PNG, GIF. Max 10MB. 5 files max.</p></div>
-                            </div>
-                        )}
+                        {isAttachmentMenuOpen && !activeMode && <div className="absolute bottom-full left-0 mb-2 w-80 bg-white dark:bg-[#2d2d2d] rounded-xl shadow-lg border border-gray-100 dark:border-gray-700 p-1 animate-in slide-in-from-bottom-2 fade-in duration-200 z-50"><button onClick={() => handleMenuOptionClick('file')} className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#3d3d3d] rounded-lg transition-colors text-left"><div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-[#3d3d3d] flex items-center justify-center flex-shrink-0"><IconFile className="w-4 h-4 text-gray-600 dark:text-gray-400" /></div>Добавить файл</button><button onClick={() => handleMenuOptionClick('image')} className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#3d3d3d] rounded-lg transition-colors text-left"><div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-[#3d3d3d] flex items-center justify-center flex-shrink-0"><IconImage className="w-4 h-4 text-gray-600 dark:text-gray-400" /></div>Добавить изображение</button><button onClick={() => handleMenuOptionClick('camera')} className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#3d3d3d] rounded-lg transition-colors text-left md:hidden"><div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-[#3d3d3d] flex items-center justify-center flex-shrink-0"><IconCamera className="w-4 h-4 text-gray-600 dark:text-gray-400" /></div>Сделать снимок</button><div className="mt-2 pt-2 border-t border-gray-100 dark:border-gray-700 px-3 pb-2"><p className="text-[10px] text-gray-400 leading-tight">Допустимые типы файлов: PDF, MD, TXT, DOC, XLS, JPG, PNG, GIF. Max 10MB. 5 files max.</p></div></div>}
                         </div>
                         
                         <textarea value={inputMessage} onChange={(e) => setInputMessage(e.target.value)} onKeyDown={handleKeyDown} placeholder={isDragging ? "Отпустите файлы здесь" : "Спросите о чем угодно"} className="flex-1 max-h-48 min-h-[24px] bg-transparent border-none outline-none focus:ring-0 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 resize-none py-2 px-2 text-sm md:text-base mx-1 outline-none" rows={1} style={{ height: 'auto', overflow: 'hidden' }} />
@@ -815,7 +588,7 @@ const App: React.FC = () => {
                     </div>
                 </div>
             </div>
-            <div className="text-center mt-2"><p className="text-[10px] text-gray-400">Это разработка компании Призма AI. ИИ может делать ошибки. Пожалуйста, проверьте важную информацию.</p></div>
+            <div className="text-center mt-2"><p className="text-[10px] text-gray-400">Это разработка компании <a href="https://www.prismaar.ru/" target="_blank" rel="noopener noreferrer" className="font-bold hover:underline">Призма AI</a>. ИИ может делать ошибки. Пожалуйста, проверьте важную информацию.</p></div>
           </div>
         </div>
       </div>

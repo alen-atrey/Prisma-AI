@@ -3,7 +3,7 @@ import { ModelOption, Settings } from './types';
 export const MODEL_OPTIONS: ModelOption[] = [
   { label: 'Auto', id: '11' },
   { label: 'GPT-5 Nano', id: '1' },
-  { label: 'GPT-5 Mini', id: '2' },
+  { label: 'GPT-4 Mini', id: '2' },
   { label: 'GPT-5.1', id: '3' },
   { label: 'GPT-5 Pro', id: '4' },
   { label: 'Gemini 2.5 Flash Lite', id: '5' },
@@ -50,5 +50,5 @@ export const SUGGESTION_CARDS = [
 
 // Supabase Configuration
 export const SUPABASE_URL = "https://prismasupabase.com";
-// Using the public Anonymous Key (Safe for frontend use with RLS policies)
+// Anonymous Key (Safe for frontend)
 export const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzY0OTc5MjAwLCJleHAiOjE5MjI3NDU2MDB9.SWVZ_tgSyeCQkmbJE12svdtEHhCJgMrrZ4c_vi9FRiY";

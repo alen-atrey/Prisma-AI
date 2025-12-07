@@ -31,7 +31,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message }) => {
   };
 
   return (
-    <div className={`flex w-full ${isAi ? 'mb-8' : 'mb-6'}`}>
+    <div className={`flex w-full ${isAi ? 'mb-8' : 'mb-6'} group`}>
       <div className="w-8 h-8 flex-shrink-0 mr-4 mt-1 flex items-center justify-center">
         {isAi ? (
           <div className="w-full h-full rounded-full bg-white dark:bg-[#2d2d2d] border border-gray-200 dark:border-gray-700 flex items-center justify-center">
@@ -91,7 +91,6 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message }) => {
            )}
 
            <div className="prose prose-sm dark:prose-invert max-w-none">
-             {/* Note: ReactMarkdown requires installation: npm install react-markdown remark-gfm */}
              <ReactMarkdown 
                 remarkPlugins={[remarkGfm]}
                 components={{
@@ -108,8 +107,8 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message }) => {
            </div>
         </div>
 
-        {isAi && (
-          <div className="mt-2 flex items-center gap-2">
+        {/* Copy button - Always visible now */}
+        <div className="mt-2 flex items-center gap-2">
             <button 
               onClick={handleCopy}
               className="text-gray-400 hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-100 dark:hover:bg-[#2d2d2d]"
@@ -118,8 +117,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message }) => {
               <IconCopy className="w-4 h-4" />
             </button>
             {copied && <span className="text-xs text-gray-500 animate-fade-in">Скопировано</span>}
-          </div>
-        )}
+        </div>
       </div>
     </div>
   );
